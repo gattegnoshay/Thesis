@@ -1,0 +1,186 @@
+### Includes model with pre and post tax using chocolate as the control group
+### Installations
+```{r}
+if (!require(segmented)) install.packages("segmented")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(lubridate)) install.packages("lubridate")
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(lmtest)) install.packages("lmtest")
+if (!require(sandwich)) install.packages("sandwich")
+if (!require(forecast)) install.packages("forecast")
+
+library(segmented)
+library(dplyr)
+library(lubridate)
+library(tidyverse)
+library(lmtest)
+library(sandwich)
+library(splines)
+library(forecast)
+library(lubridate)
+```
+
+
+```{r}
+df <- read.csv("df_Milk_full_tax_difference.csv")
+df$date <- as.Date(df$date, format = "%d/%m/%Y")
+
+if (sum(is.na(df$date)) > 0) {
+  print("Warning: Some dates couldn't be converted. Check the format.")
+}
+
+# Filter for years 2021 and 2022
+df_filtered <- df %>%
+  filter(year(date) %in% c(2021,2022, 2023)) %>%
+  filter(date < as.Date("2023-10-01")) #Filter 3 month of the war
+
+#Creating Control Group
+df_long <- df_filtered %>%
+  pivot_longer(cols = c(full_tax_count, milk_count),
+               names_to = "control",
+               values_to = "count") %>%
+  mutate(control = if_else(control == "full_tax_count", 0, 1))
+
+
+# Create time variable (days since start of 2022)
+df_long$time <- as.numeric(df_long$date - as.Date("2022-01-01"))
+
+# Create intervention dummy: 0 for 2021,2023, 1 for 2022
+df_long$intervention <- ifelse(year(df_long$date) == 2022, 1, 0)
+
+# Create intervention dummy: 0 for 2021,2022, 1 for 2023
+df_long$post <- ifelse(year(df_long$date) == 2023, 1, 0)
+
+
+
+# Add week information
+df_long$week <- floor_date(df_long$date, "week")
+
+# Group by week and control status
+df_weekly <- df_long %>%
+  group_by(week, control) %>%
+  summarize(
+    count = mean(count, na.rm = TRUE),
+    time = first(time),
+    intervention = first(intervention),
+    post = first(post),
+    .groups = "drop"
+  )
+
+# Prepare for regression
+df_regression <- df_weekly %>%
+  mutate(
+    t = time,
+    xSSB = 1-control,
+    intervention = intervention,
+    post=post,
+    xSSB_intervention = xSSB * intervention,
+    xSSB_post = xSSB * post,
+    t_xSSB_intervention = t * xSSB * intervention,
+    t_xSSB_post = t * xSSB * post
+  )
+
+
+
+```
+
+```{r}
+acf(df_regression$count, lag.max = 365,main = "ACF of count")
+pacf(df_regression$count, lag.max = 40, main = "PACF of count")
+
+```
+
+```{r}
+if (!require(corrplot)) install.packages("corrplot")
+library(corrplot)
+
+cor_matrix <- cor(df_regression[sapply(df_regression, is.numeric)], use = "complete.obs")
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black")
+```
+
+####### First GLS Model ########
+
+```{r}
+gls_model <- gls(count ~ t + xSSB + xSSB_intervention + xSSB_post , 
+                 data = df_regression,
+                 correlation = corARMA(p = 3, q = 0, form = ~ t))
+
+summary(gls_model)
+```
+
+####### First Model ########
+```{r}
+model <- lm(count ~ t + xSSB + xSSB_intervention + xSSB_post , data = df_regression)
+summary(model)
+
+# MODIFIED PLOT - Color points by control status
+plot(df_regression$t, df_regression$count, 
+     col = ifelse(df_regression$control == 1, "blue", "red"),  # Blue for control, Red for treatment
+     pch = 16, 
+     cex = 1.0,  # Increased point size for weekly data
+     main = "Weekly Grouped Data - Base Model",
+     xlab = "Time (days from Jan 1, 2022)",
+     ylab = "Average Weekly Count")
+legend("topright", 
+       legend = c("Control", "Treatment"), 
+       col = c("blue", "red"), 
+       pch = 16)
+abline(model, col = "black", lwd = 2)
+
+# Apply the Davies test to look for a significant breakpoint in `t`
+davies.test(model, seg.Z = ~t)
+```
+####### First Model ########
+```{r}
+model <- lm(count ~ t + xSSB , data = df_regression)
+summary(model)
+
+# MODIFIED PLOT - Color points by control status
+plot(df_regression$t, df_regression$count, 
+     col = ifelse(df_regression$control == 1, "blue", "red"),  # Blue for control, Red for treatment
+     pch = 16, 
+     cex = 1.0,  # Increased point size for weekly data
+     main = "Weekly Grouped Data - Base Model",
+     xlab = "Time (days from Jan 1, 2022)",
+     ylab = "Average Weekly Count")
+legend("topright", 
+       legend = c("Control", "Treatment"), 
+       col = c("blue", "red"), 
+       pch = 16)
+abline(model, col = "black", lwd = 2)
+
+# Apply the Davies test to look for a significant breakpoint in `t`
+davies.test(model, seg.Z = ~t)
+```
+
+####### 2 Segmented Model ########
+```{r}
+seg_model <- segmented(model, seg.Z = ~t, 
+                      psi = c(0,365),
+                      control = seg.control(display = TRUE, it.max = 0))
+
+summary(seg_model)
+df_regression$seg_fitted = fitted(seg_model)
+
+library(ggplot2)
+
+
+ggplot(df_regression, aes(x = t, y = count)) +
+  geom_point(alpha = 0.5, color = "gray") +
+  geom_line(aes(y = seg_fitted), color = "blue", size = 1.2) +
+  labs(title = "Segmented GLS Fit", x = "Time (t)", y = "Difference") +
+  theme_minimal()
+```
+
+####Newey West Method
+```{r}
+NW <- NeweyWest(seg_model,lag=250,prewhite =F,adjust=T)
+NW_se <- sqrt(diag(NW))
+print(NW_se)
+
+nw_coef_test <- coeftest(seg_model, vcov = NW)
+
+
+print("Coefficients with Newey-West robust standard errors:")
+print(nw_coef_test)
+```

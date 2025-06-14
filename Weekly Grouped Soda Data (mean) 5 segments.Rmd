@@ -1,0 +1,205 @@
+# Install and load necessary libraries
+if (!require(segmented)) install.packages("segmented")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(lubridate)) install.packages("lubridate")
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(lmtest)) install.packages("lmtest")
+if (!require(sandwich)) install.packages("sandwich")
+
+library(segmented)
+library(dplyr)
+library(lubridate)
+library(tidyverse)
+library(lmtest)
+library(sandwich)
+
+df <- read.csv("df_Chocolate_full_tax_difference.csv")
+df$date <- as.Date(df$date, format = "%Y-%m-%d")
+
+if (sum(is.na(df$date)) > 0) {
+  print("Warning: Some dates couldn't be converted. Check the format.")
+}
+
+# Filter for years 2021 and 2022
+df_filtered <- df %>%
+  filter(year(date) %in% c(2021, 2022))
+
+df_long <- df_filtered %>%
+  pivot_longer(cols = c(full_tax_count, soda_count),
+               names_to = "control",
+               values_to = "count") %>%
+  mutate(control = if_else(control == "full_tax_count", 0, 1))
+
+# Create time variable (days since start of 2022)
+df_long$time <- as.numeric(df_long$date - as.Date("2022-01-01"))
+
+# Create intervention dummy: 0 for 2021, 1 for 2022
+df_long$intervention <- ifelse(year(df_long$date) == 2022, 1, 0)
+
+# Add week information
+df_long$week <- floor_date(df_long$date, "week")
+
+# Group by week and control status
+df_weekly <- df_long %>%
+  group_by(week, control) %>%
+  summarize(
+    count = mean(count, na.rm = TRUE),
+    time = mean(time, na.rm = TRUE),
+    intervention = first(intervention),
+    .groups = "drop"
+  )
+
+# Prepare for regression
+df_regression <- df_weekly %>%
+  mutate(
+    t = time,
+    xSSB = 1-control,
+    xt = intervention,
+    xSSB_xt = xSSB * xt,
+    t_xSSB_xt = t * xSSB * xt
+  )
+
+####### First Model ########
+model <- lm(count ~ t + xSSB + xt + xSSB_xt + t_xSSB_xt, data = df_regression)
+summary(model)
+
+# MODIFIED PLOT - Color points by control status
+plot(df_regression$t, df_regression$count, 
+     col = ifelse(df_regression$control == 1, "blue", "red"),  # Blue for control, Red for treatment
+     pch = 16, 
+     cex = 1.0,  # Increased point size for weekly data
+     main = "Weekly Grouped Data - Base Model",
+     xlab = "Time (days from Jan 1, 2022)",
+     ylab = "Average Weekly Count")
+legend("topright", 
+       legend = c("Control", "Treatment"), 
+       col = c("blue", "red"), 
+       pch = 16)
+abline(model, col = "black", lwd = 2)
+
+# Apply the Davies test to look for a significant breakpoint in `t`
+davies.test(model, seg.Z = ~t)
+
+####### 2 Segmented Model ########
+seg_model <- segmented(model, seg.Z = ~t, npsi=2)
+summary(seg_model)
+
+# MODIFIED PLOT - Color points by control status
+plot(df_regression$t, df_regression$count, 
+     col = ifelse(df_regression$control == 1, "blue", "red"),
+     pch = 16, 
+     cex = 1.0,
+     main = "Weekly Grouped Data - 2 Segments Model",
+     xlab = "Time (days from Jan 1, 2022)",
+     ylab = "Average Weekly Count")
+legend("topright", 
+       legend = c("Control", "Treatment"), 
+       col = c("blue", "red"), 
+       pch = 16)
+plot(seg_model, add = TRUE, col = "black", lwd = 2)
+
+davies.test(seg_model, seg.Z = ~t)
+
+####### 3 Segmented Model ########
+seg_model_3 <- segmented(model, seg.Z = ~t, npsi=3)
+summary(seg_model_3)
+
+# MODIFIED PLOT - Color points by control status
+plot(df_regression$t, df_regression$count, 
+     col = ifelse(df_regression$control == 1, "blue", "red"),
+     pch = 16, 
+     cex = 1.0,
+     main = "Weekly Grouped Data - 3 Segments Model",
+     xlab = "Time (days from Jan 1, 2022)",
+     ylab = "Average Weekly Count")
+legend("topright", 
+       legend = c("Control", "Treatment"), 
+       col = c("blue", "red"), 
+       pch = 16)
+plot(seg_model_3, add = TRUE, col = "black", lwd = 2)
+
+davies.test(seg_model_3) 
+
+####### 4 Segmented Model ########
+seg_model_4 <- segmented(model, seg.Z = ~t, npsi=4)
+summary(seg_model_4)
+
+# MODIFIED PLOT - Color points by control status
+plot(df_regression$t, df_regression$count, 
+     col = ifelse(df_regression$control == 1, "blue", "red"),
+     pch = 16, 
+     cex = 1.0,
+     main = "Weekly Grouped Data - 4 Segments Model",
+     xlab = "Time (days from Jan 1, 2022)",
+     ylab = "Average Weekly Count")
+legend("topright", 
+       legend = c("Control", "Treatment"), 
+       col = c("blue", "red"), 
+       pch = 16)
+plot(seg_model_4, add = TRUE, col = "black", lwd = 2)
+
+davies.test(seg_model_4) 
+
+####### 5 Segmented Model ########
+seg_model_5 <- segmented(model, seg.Z = ~t, npsi=5)
+summary(seg_model_5)
+
+# MODIFIED PLOT - Color points by control status
+plot(df_regression$t, df_regression$count, 
+     col = ifelse(df_regression$control == 1, "blue", "red"),
+     pch = 16, 
+     cex = 1.0,
+     main = "Weekly Grouped Data - 5 Segments Model",
+     xlab = "Time (days from Jan 1, 2022)",
+     ylab = "Average Weekly Count")
+legend("topright", 
+       legend = c("Control", "Treatment"), 
+       col = c("blue", "red"), 
+       pch = 16)
+plot(seg_model_5, add = TRUE, col = "black", lwd = 2)
+
+davies.test(seg_model_5)
+
+
+AIC_base <- AIC(model)
+AIC_seg2 <- AIC(seg_model)
+AIC_seg3 <- AIC(seg_model_3)
+AIC_seg4 <- AIC(seg_model_4)
+AIC_seg5 <- AIC(seg_model_5)
+
+
+# Create a comparison table
+model_comparison <- data.frame(
+  Model = c("Base", "2 Segments", "3 Segments", "4 Segments", "5 Segments"),
+  AIC = c(AIC_base, AIC_seg2, AIC_seg3, AIC_seg4, AIC_seg5)
+)
+
+# Print the comparison table
+print("Model Comparison using AIC (lower is better):")
+print(model_comparison)
+
+# Identify the best model
+best_model <- model_comparison$Model[which.min(model_comparison$AIC)]
+print(paste("The best model based on AIC is:", best_model)) 
+
+#Breusch Godfrey test (Null hypothsis - no autocorrelation)
+print("Strat Breusch Godfrey test")
+
+for (x in 1:20) {
+  bg <- bgtest(seg_model_5, order=x, type="Chisq")
+  p_val <- bg$p.value  # Correctly extract p-value
+  if(p_val<0.05){
+     print(paste("Order", x, "p-value:", p_val)) 
+  }
+}
+
+# Newey-West method
+NW <- NeweyWest(seg_model_5,lag=2,prewhite =F,adjust=T)
+NW_se <- sqrt(diag(NW))
+print(NW_se)
+
+nw_coef_test <- coeftest(seg_model_5, vcov = NW)
+
+# Print the results with Newey-West robust standard errors
+print("Coefficients with Newey-West robust standard errors:")
+print(nw_coef_test)

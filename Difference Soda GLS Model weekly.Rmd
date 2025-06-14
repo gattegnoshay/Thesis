@@ -1,0 +1,118 @@
+---
+title: "soda machines GLS Model with weekly grouping"
+output: html_notebook
+---
+```{r}
+if (!require(segmented)) install.packages("segmented")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(lubridate)) install.packages("lubridate")
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(lmtest)) install.packages("lmtest")
+if (!require(sandwich)) install.packages("sandwich")
+if (!require(forecast)) install.packages("forecast")
+if (!require(nlme)) install.packages("nlme")
+
+library(segmented)
+library(dplyr)
+library(lubridate)
+library(tidyverse)
+library(lmtest)
+library(sandwich)
+library(splines)
+library(forecast)
+library(lubridate)
+library(nlme)
+```
+
+```{r}
+#df <- read.csv("df_Soda_full_tax_difference.csv")
+#df$date <- as.Date(df$date, format = "%d/%m/%Y")
+df <- read.csv("df_Soda_full_tax_difference.csv")
+df$date <- as.Date(df$date, format = "%Y-%m-%d")
+
+if (sum(is.na(df$date)) > 0) {
+  print("Warning: Some dates couldn't be converted. Check the format.")
+}
+
+
+# Filter for years 2021 and 2022
+df_filtered <- df %>%
+  filter(year(date) %in% c(2021, 2022,2023)) %>%
+  filter(date <= as.Date("2023-10-01")) #Filter 3 month of the war
+
+# Create time variable (days since start of 2021)
+df_filtered$time <- as.numeric(df_filtered$date - as.Date("2022-01-01"))
+
+# Create intervention dummy: 0 for 2021, 1 for 2022
+df_filtered$intervention <- ifelse(year(df_filtered$date) == 2022, 1, 0)
+
+# Create intervention dummy: 0 for 2021, 1 for 2022
+df_filtered$post_intervention <- ifelse(year(df_filtered$date) == 2023, 1, 0)
+
+df_filtered$week <- floor_date(df_filtered$date, "week")
+
+# Create 'difference' variable if it doesn't exist
+if (!"difference" %in% names(df_filtered)) {
+  if (all(c("y_It", "y_Ct") %in% names(df_filtered))) {
+    df_filtered$difference <- df_filtered$y_It - df_filtered$y_Ct
+  } else {
+    stop("Missing 'difference' or components 'y_It' and 'y_Ct' in the data.")
+  }
+}
+
+df_weekly <- df_filtered %>%
+  group_by(week) %>%
+  summarize(
+    difference = mean(difference, na.rm = TRUE),
+    time = mean(time, na.rm = TRUE),
+    intervention = first(intervention),
+     post_intervention=first(post_intervention),
+    .groups = "drop"
+  )
+
+df_regression <- df_weekly %>%
+  mutate(
+    t = time,
+    intervention = intervention,
+    post_intervention=post_intervention,
+    t_intervention = t * intervention,
+    t_post = t * post_intervention,
+  )
+```
+
+```{r}
+acf(df_regression$difference, main = "ACF of count")
+pacf(df_regression$difference, main = "PACF of count")
+
+```
+
+```{r}
+gls_model <- gls(difference ~ t , 
+                 data = df_regression,
+                 correlation = corARMA(p = 2, q = 0, form = ~ t))
+
+summary(gls_model)
+```
+
+```{r}
+seg_model <- segmented(gls_model, seg.Z = ~t, 
+                      psi = c(0, 365),
+                      control = seg.control(display = TRUE, it.max = 0))
+
+summary(seg_model)
+```
+
+
+```{r}
+# Extract fitted values
+library(ggplot2)
+
+df_regression$seg_fitted <- fitted(seg_model)
+
+ggplot(df_regression, aes(x = t, y = difference)) +
+  geom_point(alpha = 0.5, color = "gray") +
+  geom_line(aes(y = seg_fitted), color = "blue", size = 1.2) +
+  labs(title = "Segmented GLS Fit", x = "Time (t)", y = "Difference") +
+  theme_minimal()
+
+```
