@@ -69,12 +69,12 @@ df_filtered$intervention <- ifelse(year(df_filtered$date) == 2022, 1, 0)
 # Create post intervention dummy: 0 for 2021,2022, 1 for 2023
 df_filtered$post <- ifelse(year(df_filtered$date) == 2023, 1, 0)
 df_filtered$week <- floor_date(df_filtered$date, "week")
-
+print(df_filtered)
 df_filtered <- df_filtered %>%
   pivot_longer(cols = c(tax.count, product_count),
                names_to = "control",
                values_to = "count") %>%
-  mutate(control = if_else(control == prod, 0, 1))
+  mutate(control = if_else(control == "tax.count", 0, 1))
 
 
 
@@ -103,21 +103,90 @@ df_regression <- df_weekly %>%
     xSSB_post = xSSB * post
   )
 model <- lm(count ~ t + xSSB + xSSB_intervention + xSSB_post, data = df_regression)
-summary(model)
+print(summary(model))
 
 seg_model <- segmented(model, seg.Z = ~t, 
                       psi = c(0,52),
                       control = seg.control(display = TRUE, it.max = 0))
 
-summary(seg_model)
 
 return(list(model = model, seg_model = seg_model))
 }
 
 
 ```
-
 ### Run Analysis for All Tax Category vs Product Combinations
+```{r}
+results_df <- data.frame()
+for (tax_cat in tax_categories) {
+  for (prod in products) {
+    
+    current_results<- data.frame()
+    
+    result <- run_cits_analysis(tax_cat, prod, df_itteration)
+    lm_model = result$model
+    seg_model = result$seg_model
+    
+current_results <- data.frame(
+  tax_cat = tax_cat,
+  prod = prod,
+  n_obs = length(residuals(lm_model)),
+  
+  # Linear model results
+  lm_r2 = summary(lm_model)$r.squared,
+  lm_adj_r2 = summary(lm_model)$adj.r.squared,
+  lm_aic = AIC(lm_model),
+  lm_bic = BIC(lm_model),
+  lm_rmse = sqrt(mean(residuals(lm_model)^2)),
+  lm_df = lm_model$df.residual,
+  lm_fstat = summary(lm_model)$fstatistic[1],
+  lm_pval = pf(summary(lm_model)$fstatistic[1], 
+               summary(lm_model)$fstatistic[2], 
+               summary(lm_model)$fstatistic[3], 
+               lower.tail = FALSE),
+  
+  # Segmented model results
+  seg_r2 = summary(seg_model)$r.squared,
+  seg_adj_r2 = summary(seg_model)$adj.r.squared,
+  seg_aic = AIC(seg_model),
+  seg_bic = BIC(seg_model),
+  seg_rmse = sqrt(mean(residuals(seg_model)^2)),
+  seg_df = seg_model$df.residual,
+  seg_fstat = summary(seg_model)$fstatistic[1],
+  seg_pval = pf(summary(seg_model)$fstatistic[1], 
+                summary(seg_model)$fstatistic[2], 
+                summary(seg_model)$fstatistic[3], 
+                lower.tail = FALSE),
+  
+ lm_XSSB_p_value = ifelse("XSSB" %in% rownames(summary(lm_model)$coefficients), 
+                            summary(lm_model)$coefficients["XSSB", "Pr(>|t|)"], NA),
+  lm_xSSB_intervention_p_value = ifelse("xSSB_intervention" %in% rownames(summary(lm_model)$coefficients), 
+                                        summary(lm_model)$coefficients["xSSB_intervention", "Pr(>|t|)"], NA),
+  lm_xSSB_post_p_value = ifelse("xSSB_post" %in% rownames(summary(lm_model)$coefficients), 
+                                summary(lm_model)$coefficients["xSSB_post", "Pr(>|t|)"], NA),
+  lm_t_p_value = ifelse("t" %in% rownames(summary(lm_model)$coefficients), 
+                        summary(lm_model)$coefficients["t", "Pr(>|t|)"], NA),
+  
+  # Coefficient p-values from segmented model (set to NA if not found)
+  seg_XSSB_p_value = ifelse("XSSB" %in% rownames(summary(seg_model)$coefficients), 
+                             summary(seg_model)$coefficients["XSSB", "Pr(>|t|)"], NA),
+  seg_xSSB_intervention_p_value = ifelse("xSSB_intervention" %in% rownames(summary(seg_model)$coefficients), 
+                                         summary(seg_model)$coefficients["xSSB_intervention", "Pr(>|t|)"], NA),
+  seg_xSSB_post_p_value = ifelse("xSSB_post" %in% rownames(summary(seg_model)$coefficients), 
+                                 summary(seg_model)$coefficients["xSSB_post", "Pr(>|t|)"], NA),
+  seg_t_p_value = ifelse("t" %in% rownames(summary(seg_model)$coefficients), 
+                         summary(seg_model)$coefficients["t", "Pr(>|t|)"], NA)
+)
+# Append to results dataframe
+results_df <- rbind(results_df, current_results)
+  }
+}
+```
+###Save the resutls
+```{r}
+write.csv(results_df, "cits_analysis_results.csv", row.names = FALSE)
+```
+###To delete?
 ```{r}
 
 # Run analysis for each tax category with each product as control
