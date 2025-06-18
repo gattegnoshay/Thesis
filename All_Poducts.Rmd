@@ -26,21 +26,22 @@ library(ggplot2)
 ### Data Engineering
 ```{r}
 # Read the data
-df <- read.csv("All_Product_tax.csv")  # Replace with your actual file name
-df$date <- as.Date(df$date, format = "%Y-%m-%d")
+df <- read.csv("All_Poduct_tax.csv")  # Replace with your actual file name
+df$date <- as.Date(df$date, format = "%d/%m/%Y")
 
 if (sum(is.na(df$date)) > 0) {
   print("Warning: Some dates couldn't be converted. Check the format.")
 }
 
-# Filter for years 2021, 2022, and 2023 (up to October 1st)
+
+# Filter for years 2021 and 2022
 df_filtered <- df %>%
-  filter(year(date) %in% c(2021, 2022, 2023)) %>%
-  filter(date <= as.Date("2023-10-01"))
+  filter(year(date) %in% c(2021,2022, 2023)) %>%
+  filter(date <= as.Date("2023-10-01")) #Filter 3 month of the war
 
 # Get unique tax categories (treatment groups)
 tax_categories <- df_filtered %>%
-  pull(tax_category) %>%
+  pull(tax.category) %>%
   unique()
 
 # Get unique products (potential control groups)
@@ -56,181 +57,114 @@ print(products)
 
 ### Function to Run Analysis for Each Tax Category vs Product Pair
 ```{r}
-run_cits_analysis <- function(treatment_tax_category, control_product, data) {
+run_cits_analysis <- function(tax_cat, prod, df) {
   
-  cat("\n=== Analysis for Tax Category:", treatment_tax_category, "vs Product:", control_product, "===\n")
-  
-  # Filter data for specific tax category and product
-  df_treatment <- data %>%
-    filter(tax_category == treatment_tax_category) %>%
-    mutate(group_type = "treatment", 
-           count = tax_count,
-           group_id = tax_category)
-  
-  df_control <- data %>%
-    filter(product == control_product) %>%
-    mutate(group_type = "control", 
-           count = product_count,
-           group_id = product)
-  
-  # Combine treatment and control data
-  df_pair <- rbind(
-    df_treatment %>% select(date, count, group_type, group_id),
-    df_control %>% select(date, count, group_type, group_id)
+df_filtered <- df_filtered %>%
+  filter(product == prod & tax.category == tax_cat)
+# Create intervention dummy: 0 for 2021,2023, 1 for 2022
+df_filtered$time <- as.numeric(df_filtered$date - as.Date("2022-01-01"))
+
+
+df_filtered$intervention <- ifelse(year(df_filtered$date) == 2022, 1, 0)
+# Create post intervention dummy: 0 for 2021,2022, 1 for 2023
+df_filtered$post <- ifelse(year(df_filtered$date) == 2023, 1, 0)
+df_filtered$week <- floor_date(df_filtered$date, "week")
+
+df_filtered <- df_filtered %>%
+  pivot_longer(cols = c(tax.count, product_count),
+               names_to = "control",
+               values_to = "count") %>%
+  mutate(control = if_else(control == prod, 0, 1))
+
+
+
+# Add week information
+df_filtered$week <- floor_date(df_filtered$date, "week")
+
+# Group by week and control status
+df_weekly <- df_filtered %>%
+  group_by(week, control) %>%
+  summarize(
+    count = mean(count, na.rm = TRUE),
+    time = first(time),
+    intervention = first(intervention),
+    post = first(post),
+    .groups = "drop"
   )
-  
-  # Check if we have data for both groups
-  if (length(unique(df_pair$group_type)) < 2) {
-    cat("Insufficient data: missing treatment or control group\n")
-    return(NULL)
-  }
-  
-  # Create control variable (1 for control, 0 for treatment)
-  df_pair <- df_pair %>%
-    mutate(control = ifelse(group_type == "control", 1, 0))
-  
-  # Create time variable (days since start of 2022)
-  df_pair$time <- as.numeric(df_pair$date - as.Date("2022-01-01"))
-  
-  # Create intervention dummy: 0 for 2021,2023, 1 for 2022
-  df_pair$intervention <- ifelse(year(df_pair$date) == 2022, 1, 0)
-  
-  # Create post-intervention dummy: 0 for 2021,2022, 1 for 2023
-  df_pair$post <- ifelse(year(df_pair$date) == 2023, 1, 0)
-  
-  # Add week information
-  df_pair$week <- floor_date(df_pair$date, "week")
-  
-  # Group by week and control status
-  df_weekly <- df_pair %>%
-    group_by(week, control) %>%
-    summarize(
-      count = mean(count, na.rm = TRUE),
-      time = first(time),
-      intervention = first(intervention),
-      post = first(post),
-      .groups = "drop"
-    )
-  
-  # Check if we have enough data
-  if (nrow(df_weekly) < 20) {
-    cat("Insufficient data for analysis (less than 20 observations)\n")
-    return(NULL)
-  }
-  
-  # Prepare for regression
-  df_regression <- df_weekly %>%
-    mutate(
-      t = time,
-      xSSB = 1 - control,  # 1 for treatment, 0 for control
-      intervention = intervention,
-      post = post,
-      xSSB_intervention = xSSB * intervention,
-      xSSB_post = xSSB * post,
-      t_xSSB_intervention = t * xSSB * intervention,
-      t_xSSB_post = t * xSSB * post
-    )
-  
-  # Base model
-  model <- lm(count ~ t + xSSB + xSSB_intervention + xSSB_post, data = df_regression)
-  
-  # Segmented model
-  tryCatch({
-    seg_model <- segmented(model, seg.Z = ~t, 
-                          psi = c(0, 365),
-                          control = seg.control(display = FALSE, it.max = 100))
-    
-    # Newey-West robust standard errors
-    NW <- NeweyWest(seg_model, lag = 25, prewhite = FALSE, adjust = TRUE)
-    nw_coef_test <- coeftest(seg_model, vcov = NW)
-    
-    # Extract key results
-    model_summary <- summary(seg_model)
-    f_stat <- summary(model)$fstatistic[1]
-    f_pvalue <- pf(f_stat, 
-                   summary(model)$fstatistic[2], 
-                   summary(model)$fstatistic[3], 
-                   lower.tail = FALSE)
-    
-    # Get xSSB_intervention coefficient and t-statistic from Newey-West
-    xSSB_coef <- nw_coef_test["xSSB_intervention", "Estimate"]
-    xSSB_tstat <- nw_coef_test["xSSB_intervention", "t value"]
-    xSSB_pvalue <- nw_coef_test["xSSB_intervention", "Pr(>|t|)"]
-    
-    # Create results summary
-    results <- list(
-      treatment_group = treatment_tax_category,
-      control_group = control_product,
-      n_observations = nrow(df_regression),
-      f_statistic = f_stat,
-      f_pvalue = f_pvalue,
-      xSSB_intervention_coef = xSSB_coef,
-      xSSB_intervention_tstat = xSSB_tstat,
-      xSSB_intervention_pvalue = xSSB_pvalue,
-      xSSB_intervention_significant = abs(xSSB_tstat) > 1.96,
-      model = seg_model,
-      nw_results = nw_coef_test,
-      data = df_regression
-    )
-    
-    # Print summary
-    cat("F-statistic:", round(f_stat, 3), "(p-value:", round(f_pvalue, 4), ")\n")
-    cat("xSSB_intervention coefficient:", round(xSSB_coef, 3), "\n")
-    cat("xSSB_intervention t-statistic:", round(xSSB_tstat, 3), "(p-value:", round(xSSB_pvalue, 4), ")\n")
-    cat("xSSB_intervention significant (|t| > 1.96):", results$xSSB_intervention_significant, "\n")
-    
-    return(results)
-    
-  }, error = function(e) {
-    cat("Error in segmented regression:", e$message, "\n")
-    return(NULL)
-  })
+
+# Prepare for regression
+df_regression <- df_weekly %>%
+  mutate(
+    t = time,
+    xSSB = 1-control,
+    intervention = intervention,
+    post=post,
+    xSSB_intervention = xSSB * intervention,
+    xSSB_post = xSSB * post
+  )
+model <- lm(count ~ t + xSSB + xSSB_intervention + xSSB_post, data = df_regression)
+summary(model)
+
+seg_model <- segmented(model, seg.Z = ~t, 
+                      psi = c(0,52),
+                      control = seg.control(display = TRUE, it.max = 0))
+
+summary(seg_model)
+
+return(list(model = model, seg_model = seg_model))
 }
+
+
 ```
 
 ### Run Analysis for All Tax Category vs Product Combinations
 ```{r}
-# Initialize results storage
-all_results <- list()
-result_counter <- 1
 
 # Run analysis for each tax category with each product as control
 for (tax_cat in tax_categories) {
   for (prod in products) {
     result <- run_cits_analysis(tax_cat, prod, df_filtered)
-    if (!is.null(result)) {
-      all_results[[result_counter]] <- result
-      result_counter <- result_counter + 1
-    }
-  }
-}
+    lm_model <- result$model
+    seg_model <- result$seg_model
+        
+    lm_r2 <- summary(lm_model)$r.squared
+    seg_r2 <- summary(seg_model)$r.squared
+    lm_adj_r2 <- summary(lm_model)$adj.r.squared
+    seg_adj_r2 <- summary(seg_model)$adj.r.squared
+    lm_aic <- AIC(lm_model)
+    seg_aic <- AIC(seg_model)
+    lm_bic <- BIC(lm_model)
+    seg_bic <- BIC(seg_model)
+    lm_rmse <- sqrt(mean(residuals(lm_model)^2))
+    seg_rmse <- sqrt(mean(residuals(seg_model)^2))
+    
+    lm_df <- lm_model$df.residual
+    seg_df <- seg_model$df.residual
+    n_obs <- length(residuals(lm_model))
+    lm_fstat <- summary(lm_model)$fstatistic[1]
+    seg_fstat <- summary(seg_model)$fstatistic[1]
+  
+    # P-values for F-tests
+    lm_pval <- pf(summary(lm_model)$fstatistic[1], 
+                summary(lm_model)$fstatistic[2], 
+                summary(lm_model)$fstatistic[3], 
+                lower.tail = FALSE)
+    seg_pval <- pf(summary(seg_model)$fstatistic[1], 
+                 summary(seg_model)$fstatistic[2], 
+                 summary(seg_model)$fstatistic[3], 
+                 lower.tail = FALSE)
+    
+    
+    XSSB_p_value <- summary(model)$coefficients["XSSB", "Pr(>|t|)"]
+    xSSB_intervention_p_value <- summary(model)$coefficients["xSSB_intervention",  "Pr(>|t|)"]
+    xSSB_post_p_value <- summary(model)$coefficients["xSSB_post", "Pr(>|t|)"]
+    t_p_value <- summary(model)$coefficients["t", "Pr(>|t|)"]
 
-# Create summary table of results
-if (length(all_results) > 0) {
-  results_df <- data.frame(
-    Tax_Category = sapply(all_results, function(x) x$treatment_group),
-    Product_Control = sapply(all_results, function(x) x$control_group),
-    N_Observations = sapply(all_results, function(x) x$n_observations),
-    F_Statistic = sapply(all_results, function(x) round(x$f_statistic, 3)),
-    F_PValue = sapply(all_results, function(x) round(x$f_pvalue, 4)),
-    xSSB_Coef = sapply(all_results, function(x) round(x$xSSB_intervention_coef, 3)),
-    xSSB_TStat = sapply(all_results, function(x) round(x$xSSB_intervention_tstat, 3)),
-    xSSB_PValue = sapply(all_results, function(x) round(x$xSSB_intervention_pvalue, 4)),
-    xSSB_Significant = sapply(all_results, function(x) x$xSSB_intervention_significant),
-    stringsAsFactors = FALSE
-  )
   
-  print("=== SUMMARY OF ALL ANALYSES ===")
-  print(results_df)
-  
-  # Rank by F-statistic and significance
-  results_df$Rank_Score <- results_df$F_Statistic * ifelse(results_df$xSSB_Significant, 1, 0.1)
-  results_ranked <- results_df[order(results_df$Rank_Score, decreasing = TRUE), ]
-  
-  print("\n=== RANKED RESULTS (by F-statistic and xSSB significance) ===")
-  print(results_ranked[, c("Tax_Category", "Product_Control", "F_Statistic", 
-                          "xSSB_TStat", "xSSB_Significant", "Rank_Score")])
-}
+  }
+
+  }
+
 ```
 
 ### Plot Best Result
